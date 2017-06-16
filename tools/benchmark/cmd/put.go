@@ -29,6 +29,7 @@ import (
 	"golang.org/x/net/context"
 	"golang.org/x/time/rate"
 	"gopkg.in/cheggaaa/pb.v1"
+	"strconv"
 )
 
 // putCmd represents the put command
@@ -48,6 +49,8 @@ var (
 
 	keySpaceSize int
 	seqKeys      bool
+	keyPrefix    string
+	updateTotal  int
 
 	compactInterval   time.Duration
 	compactIndexDelta int64
@@ -62,6 +65,10 @@ func init() {
 	putCmd.Flags().IntVar(&putTotal, "total", 10000, "Total number of put requests")
 	putCmd.Flags().IntVar(&keySpaceSize, "key-space-size", 1, "Maximum possible keys")
 	putCmd.Flags().BoolVar(&seqKeys, "sequential-keys", false, "Use sequential keys")
+
+	putCmd.Flags().StringVar(&keyPrefix, "key-prefix", "", "Key prefix")
+	putCmd.Flags().IntVar(&updateTotal, "update-total", 0, "Total number of update count. default is 0. sequential-keys,key-prefix needs to be set")
+
 	putCmd.Flags().DurationVar(&compactInterval, "compact-interval", 0, `Interval to compact database (do not duplicate this with etcd's 'auto-compaction-retention' flag) (e.g. --compact-interval=5m compacts every 5-minute)`)
 	putCmd.Flags().Int64Var(&compactIndexDelta, "compact-index-delta", 1000, "Delta between current revision and compact revision (e.g. current revision 10000, compact at 9000)")
 }
@@ -80,7 +87,7 @@ func putFunc(cmd *cobra.Command, args []string) {
 	clients := mustCreateClients(totalClients, totalConns)
 	k, v := make([]byte, keySize), string(mustRandBytes(valSize))
 
-	bar = pb.New(putTotal)
+	bar = pb.New(putTotal + updateTotal)
 	bar.Format("Bom !")
 	bar.Start()
 
@@ -103,11 +110,21 @@ func putFunc(cmd *cobra.Command, args []string) {
 	go func() {
 		for i := 0; i < putTotal; i++ {
 			if seqKeys {
-				binary.PutVarint(k, int64(i%keySpaceSize))
+				if keyPrefix != "" {
+					k = []byte(keyPrefix + "/" + strconv.Itoa(i))
+				} else {
+					binary.PutVarint(k, int64(i%keySpaceSize))
+				}
 			} else {
 				binary.PutVarint(k, int64(rand.Intn(keySpaceSize)))
 			}
 			requests <- v3.OpPut(string(k), v)
+		}
+		if seqKeys && keyPrefix != "" {
+			for i := 0; i < updateTotal; i++ {
+				k, v := []byte(keyPrefix+"/"+strconv.Itoa(rand.Intn(putTotal))), string(mustRandBytes(valSize))
+				requests <- v3.OpPut(string(k), v)
+			}
 		}
 		close(requests)
 	}()
